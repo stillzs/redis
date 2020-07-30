@@ -304,6 +304,7 @@ func (c *baseClient) withConn(
 }
 
 func (c *baseClient) process(ctx context.Context, cmd Cmder) error {
+	//调用_process
 	err := c._process(ctx, cmd)
 	if err != nil {
 		cmd.SetErr(err)
@@ -328,12 +329,15 @@ func (c *baseClient) _process(ctx context.Context, cmd Cmder) error {
 			retryTimeout := true
 			err := c.withConn(ctx, func(ctx context.Context, cn *pool.Conn) error {
 				err := cn.WithWriter(ctx, c.opt.WriteTimeout, func(wr *proto.Writer) error {
+					//通过redis协议写入命令
 					return writeCmd(wr, cmd)
 				})
 				if err != nil {
 					return err
 				}
 
+				//通过redis协议读取命令 调用command.go中xxxCmd的readReply方法
+				//最终调用proto/reader.go
 				err = cn.WithReader(ctx, c.cmdTimeout(cmd), cmd.readReply)
 				if err != nil {
 					retryTimeout = cmd.readTimeout() == nil
@@ -546,13 +550,18 @@ type Client struct {
 }
 
 // NewClient returns a client to the Redis Server specified by Options.
+//获取一个redis客户端
 func NewClient(opt *Options) *Client {
+	//参数初始化
 	opt.init()
 
+	//实例化Client
 	c := Client{
-		baseClient: newBaseClient(opt, newConnPool(opt)),
+		baseClient: newBaseClient(opt, newConnPool(opt)), //newConnPool实例化一个ConnPool
 		ctx:        context.Background(),
 	}
+
+	//设置执行的方法为baseClient.process方法，执行的具体redis命令
 	c.cmdable = c.Process
 
 	return &c
@@ -596,6 +605,7 @@ func (c *Client) Do(ctx context.Context, args ...interface{}) *Cmd {
 }
 
 func (c *Client) Process(ctx context.Context, cmd Cmder) error {
+	//执行baseClient.process
 	return c.hooks.process(ctx, cmd, c.baseClient.process)
 }
 

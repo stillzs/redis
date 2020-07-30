@@ -20,7 +20,7 @@ type Cmder interface {
 	stringArg(int) string
 
 	readTimeout() *time.Duration
-	readReply(rd *proto.Reader) error
+	readReply(rd *proto.Reader) error //按照redis协议读取响应数据 针对每种cmd类型都有单独的方法
 
 	SetErr(error)
 	Err() error
@@ -52,6 +52,7 @@ func writeCmds(wr *proto.Writer, cmds []Cmder) error {
 	return nil
 }
 
+//按照redis协议写入数据
 func writeCmd(wr *proto.Writer, cmd Cmder) error {
 	return wr.WriteArgs(cmd.Args())
 }

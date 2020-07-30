@@ -108,6 +108,9 @@ type Cmdable interface {
 	Append(ctx context.Context, key, value string) *IntCmd
 	Decr(ctx context.Context, key string) *IntCmd
 	DecrBy(ctx context.Context, key string, decrement int64) *IntCmd
+	/**
+	关注Get
+	*/
 	Get(ctx context.Context, key string) *StringCmd
 	GetRange(ctx context.Context, key string, start, end int64) *StringCmd
 	GetSet(ctx context.Context, key string, value interface{}) *StringCmd
@@ -117,6 +120,9 @@ type Cmdable interface {
 	MGet(ctx context.Context, keys ...string) *SliceCmd
 	MSet(ctx context.Context, values ...interface{}) *StatusCmd
 	MSetNX(ctx context.Context, values ...interface{}) *BoolCmd
+	/**
+	关注Set
+	*/
 	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *StatusCmd
 	SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) *BoolCmd
 	SetXX(ctx context.Context, key string, value interface{}, expiration time.Duration) *BoolCmd
@@ -679,8 +685,12 @@ func (c cmdable) DecrBy(ctx context.Context, key string, decrement int64) *IntCm
 }
 
 // Redis `GET key` command. It returns redis.Nil error when key does not exist.
+//关注Get命令
 func (c cmdable) Get(ctx context.Context, key string) *StringCmd {
+	//拼接响应为StringCmd的结构
 	cmd := NewStringCmd(ctx, "get", key)
+
+	//这个方法在在初始化是绑定到了baseClient的_process方法
 	_ = c(ctx, cmd)
 	return cmd
 }
@@ -768,7 +778,9 @@ func (c cmdable) Set(ctx context.Context, key string, value interface{}, expirat
 			args = append(args, "ex", formatSec(ctx, expiration))
 		}
 	}
+	//拼接响应为statusCmd的结构
 	cmd := NewStatusCmd(ctx, args...)
+	//这个方法在在初始化时绑定到了baseClient的_process方法
 	_ = c(ctx, cmd)
 	return cmd
 }
