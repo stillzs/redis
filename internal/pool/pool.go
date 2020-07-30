@@ -36,55 +36,56 @@ type Stats struct {
 }
 
 type Pooler interface {
-	NewConn(context.Context) (*Conn, error)
-	CloseConn(*Conn) error
+	NewConn(context.Context) (*Conn, error) //创建连接
+	CloseConn(*Conn) error                  //关闭连接
 
-	Get(context.Context) (*Conn, error)
-	Put(*Conn)
-	Remove(*Conn, error)
+	Get(context.Context) (*Conn, error) //获取连接
+	Put(*Conn)                          //放回连接
+	Remove(*Conn, error)                //移除连接
 
-	Len() int
-	IdleLen() int
-	Stats() *Stats
+	Len() int      //连接池长度
+	IdleLen() int  //空闲连接池长度
+	Stats() *Stats //连接池状态获取
 
-	Close() error
+	Close() error //关闭连接池
 }
 
 type Options struct {
 	Dialer  func(context.Context) (net.Conn, error)
 	OnClose func(*Conn) error
 
-	PoolSize           int
-	MinIdleConns       int
-	MaxConnAge         time.Duration
-	PoolTimeout        time.Duration
-	IdleTimeout        time.Duration
-	IdleCheckFrequency time.Duration
+	PoolSize           int           //连接池大小
+	MinIdleConns       int           //最小的空闲连接数
+	MaxConnAge         time.Duration //客户端关闭连接的时间
+	PoolTimeout        time.Duration //连接池超时时间
+	IdleTimeout        time.Duration //空闲连接闲置超过该事件 将被关闭
+	IdleCheckFrequency time.Duration //进行空闲检查的时间
 }
 
 type lastDialErrorWrap struct {
 	err error
 }
 
+//核心连接池结构体
 type ConnPool struct {
-	opt *Options
+	opt *Options //连接池配置
 
-	dialErrorsNum uint32 // atomic
+	dialErrorsNum uint32 // atomic 连接池错误次数
 
-	lastDialError atomic.Value
+	lastDialError atomic.Value //上一次连接错误
 
-	queue chan struct{}
+	queue chan struct{} //工作连接队列
 
-	connsMu      sync.Mutex
-	conns        []*Conn
-	idleConns    []*Conn
-	poolSize     int
-	idleConnsLen int
+	connsMu      sync.Mutex //连接队列锁
+	conns        []*Conn    //连接切片
+	idleConns    []*Conn    //空闲连接切片
+	poolSize     int        //连接池大小
+	idleConnsLen int        //空闲连接大小
 
-	stats Stats
+	stats Stats //连接池状态统计
 
-	_closed  uint32 // atomic
-	closedCh chan struct{}
+	_closed  uint32        // atomic连接池状态
+	closedCh chan struct{} //连接池关闭通道
 }
 
 var _ Pooler = (*ConnPool)(nil)
@@ -99,10 +100,12 @@ func NewConnPool(opt *Options) *ConnPool {
 		closedCh:  make(chan struct{}),
 	}
 
+	//检查最小连接数 如果最小连接数不足 新建连接
 	p.connsMu.Lock()
 	p.checkMinIdleConns()
 	p.connsMu.Unlock()
 
+	//等待空闲连接超时 +　空闲连接检查　均设置的时候开启一个清理空闲连接的go程
 	if opt.IdleTimeout > 0 && opt.IdleCheckFrequency > 0 {
 		go p.reaper(opt.IdleCheckFrequency)
 	}
@@ -114,10 +117,12 @@ func (p *ConnPool) checkMinIdleConns() {
 	if p.opt.MinIdleConns == 0 {
 		return
 	}
+	//如果当前连接小于连接池的连接数 空闲连接小于最小空闲连接 通过go程新建连接
 	for p.poolSize < p.opt.PoolSize && p.idleConnsLen < p.opt.MinIdleConns {
-		p.poolSize++
-		p.idleConnsLen++
+		p.poolSize++     //连接数
+		p.idleConnsLen++ //空闲连接数
 		go func() {
+			//添加空闲连接
 			err := p.addIdleConn()
 			if err != nil {
 				p.connsMu.Lock()
@@ -135,6 +140,7 @@ func (p *ConnPool) addIdleConn() error {
 		return err
 	}
 
+	//连接池和空闲连接池均添加该连接
 	p.connsMu.Lock()
 	p.conns = append(p.conns, cn)
 	p.idleConns = append(p.idleConns, cn)
@@ -227,12 +233,14 @@ func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
 		return nil, ErrClosed
 	}
 
+	//todo 该逻辑后续再度
 	err := p.waitTurn(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	for {
+		//获取连接
 		p.connsMu.Lock()
 		cn := p.popIdle()
 		p.connsMu.Unlock()
@@ -241,17 +249,21 @@ func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
 			break
 		}
 
+		//判断是否是无效连接 如果是无效连接则继续变流
 		if p.isStaleConn(cn) {
 			_ = p.CloseConn(cn)
 			continue
 		}
 
+		//统计计数 获取连接命中数+1
 		atomic.AddUint32(&p.stats.Hits, 1)
 		return cn, nil
 	}
 
+	//统计计数 未获取连接数+1
 	atomic.AddUint32(&p.stats.Misses, 1)
 
+	//新建连接 并直接添加至连接池
 	newcn, err := p.newConn(ctx, true)
 	if err != nil {
 		p.freeTurn()
@@ -319,17 +331,20 @@ func (p *ConnPool) popIdle() *Conn {
 }
 
 func (p *ConnPool) Put(cn *Conn) {
+	//判断连接是否还有数据未被读取 如果有移除连接 并返回响应错误
 	if cn.rd.Buffered() > 0 {
 		internal.Logger.Printf(context.Background(), "Conn has unread data")
 		p.Remove(cn, BadConnError{})
 		return
 	}
 
+	//如果连接未放入连接池 则直接移除
 	if !cn.pooled {
 		p.Remove(cn, nil)
 		return
 	}
 
+	//将连接放回到空闲队列  并对队列计数+1
 	p.connsMu.Lock()
 	p.idleConns = append(p.idleConns, cn)
 	p.idleConnsLen++
@@ -355,11 +370,15 @@ func (p *ConnPool) removeConnWithLock(cn *Conn) {
 }
 
 func (p *ConnPool) removeConn(cn *Conn) {
+	//遍历队列 找到要关闭的连接
 	for i, c := range p.conns {
 		if c == cn {
+			//重新拼接连接切片
 			p.conns = append(p.conns[:i], p.conns[i+1:]...)
+			//如果是连接池中
 			if cn.pooled {
 				p.poolSize--
+				//检查最小空余连接数量
 				p.checkMinIdleConns()
 			}
 			return
@@ -368,6 +387,7 @@ func (p *ConnPool) removeConn(cn *Conn) {
 }
 
 func (p *ConnPool) closeConn(cn *Conn) error {
+	//先执行关闭连接的回调函数 在关闭连接
 	if p.opt.OnClose != nil {
 		_ = p.opt.OnClose(cn)
 	}
@@ -390,6 +410,7 @@ func (p *ConnPool) IdleLen() int {
 	return n
 }
 
+//获取连接池状态
 func (p *ConnPool) Stats() *Stats {
 	idleLen := p.IdleLen()
 	return &Stats{
@@ -411,6 +432,7 @@ func (p *ConnPool) Filter(fn func(*Conn) bool) error {
 	var firstErr error
 	p.connsMu.Lock()
 	for _, cn := range p.conns {
+		//对所有满足条件的连接进行关闭
 		if fn(cn) {
 			if err := p.closeConn(cn); err != nil && firstErr == nil {
 				firstErr = err
@@ -422,12 +444,15 @@ func (p *ConnPool) Filter(fn func(*Conn) bool) error {
 }
 
 func (p *ConnPool) Close() error {
+	//检查关闭标注
 	if !atomic.CompareAndSwapUint32(&p._closed, 0, 1) {
 		return ErrClosed
 	}
+	//关闭通道，连接池中的所有协程都可以通过判断该通道是否关闭来确定连接池是否已经关闭
 	close(p.closedCh)
 
 	var firstErr error
+	//遍历关闭所有连接
 	p.connsMu.Lock()
 	for _, cn := range p.conns {
 		if err := p.closeConn(cn); err != nil && firstErr == nil {
@@ -449,19 +474,19 @@ func (p *ConnPool) reaper(frequency time.Duration) {
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-ticker.C: //定时器触发
 			// It is possible that ticker and closedCh arrive together,
 			// and select pseudo-randomly pick ticker case, we double
 			// check here to prevent being executed after closed.
 			if p.closed() {
 				return
 			}
-			_, err := p.ReapStaleConns()
+			_, err := p.ReapStaleConns() //清理过期的连接
 			if err != nil {
 				internal.Logger.Printf(context.Background(), "ReapStaleConns failed: %s", err)
 				continue
 			}
-		case <-p.closedCh:
+		case <-p.closedCh: //连接池关闭触发
 			return
 		}
 	}
@@ -469,16 +494,18 @@ func (p *ConnPool) reaper(frequency time.Duration) {
 
 func (p *ConnPool) ReapStaleConns() (int, error) {
 	var n int
+	//无限循环 直到所有过期连接均被清理
 	for {
 		p.getTurn()
 
+		//取出过期连接 永远只取idleConns[0] 如果该连接有效，则证明后续连接都未超时
 		p.connsMu.Lock()
 		cn := p.reapStaleConn()
 		p.connsMu.Unlock()
 		p.freeTurn()
 
 		if cn != nil {
-			_ = p.closeConn(cn)
+			_ = p.closeConn(cn) //关闭过期连接
 			n++
 		} else {
 			break
@@ -493,6 +520,7 @@ func (p *ConnPool) reapStaleConn() *Conn {
 		return nil
 	}
 
+	//取出空闲连接，判断是否为过期连接
 	cn := p.idleConns[0]
 	if !p.isStaleConn(cn) {
 		return nil
@@ -511,9 +539,11 @@ func (p *ConnPool) isStaleConn(cn *Conn) bool {
 	}
 
 	now := time.Now()
+	//连接从上次使用之后的空闲时间大于闲置超时时间时就会被关闭
 	if p.opt.IdleTimeout > 0 && now.Sub(cn.UsedAt()) >= p.opt.IdleTimeout {
 		return true
 	}
+	//连接超过最大连接使用时间 就会被关闭
 	if p.opt.MaxConnAge > 0 && now.Sub(cn.createdAt) >= p.opt.MaxConnAge {
 		return true
 	}
